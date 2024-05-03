@@ -1,6 +1,7 @@
 import numpy as np
+from typing import List, Tuple
 import pickle
-from Dataset.dataset.dataset import H5GIWAXSDataset
+from Dataset.dataset.dataset_adv import H5GIWAXSDataset
 from Dataset.dataset.dataset import calc_polar_image, calc_quazipolar_image
 from Dataset.dataset.dataset_h import H5GIWAXSDataset_h
 import matplotlib.pyplot as plt
@@ -14,7 +15,9 @@ from scipy.optimize import curve_fit
 from multiprocessing import Pool
 import lmfit
 import torch
+import torch.nn as nn
 import torch.optim as optim
+from torch import Tensor
 from scipy.ndimage import label
 import pywt
 from matplotlib.patches import Ellipse
@@ -29,6 +32,65 @@ from math import sqrt
 from scipy.spatial import distance
 import matplotlib.gridspec as gridspec
 from fit_functions_lmfit import FitBoxes
+
+from gixd_detectron.metrics.match_criteria import (
+    Matcher,
+    IoUMatcher,
+    QMatcher,
+)
+
+from gixd_detectron.ml.postprocessing import (
+    Postprocessing,
+    StandardPostprocessing,
+    MergeBoxesPostprocessing,
+    SmallQFilter,
+    TargetBasedSmallQFilter,
+)
+
+from gixd_detectron.metrics.calc_metrics import get_exp_metrics
+from gixd_detectron.simulations import FastSimulation, SimulationConfig
+
+from gixd_detectron.ml.postprocessing import (
+    Postprocessing,
+    PostprocessingPipeline,
+    StandardPostprocessing,
+    MergeBoxesPostprocessing,
+    SmallQFilter,
+    TargetBasedSmallQFilter,
+)
+
+
+class SimpleBinaryClassifier(nn.Module):
+    def __init__(self):
+        super(SimpleBinaryClassifier, self).__init__()
+        self.fc1 = nn.Linear(14, 32)  # First hidden layer
+        self.relu = nn.ReLU()  # ReLU activation function
+        self.fc2 = nn.Linear(32, 16)  # Second hidden layer
+        self.output = nn.Linear(16, 1)  # Output layer
+        self.sigmoid = nn.Sigmoid()  # Sigmoid activation function
+
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        x = self.sigmoid(self.output(x))
+        return x
+
+
+class SimpleBinaryClassifier_12(nn.Module):
+    def __init__(self):
+        super(SimpleBinaryClassifier_12, self).__init__()
+        self.fc1 = nn.Linear(12, 32)  # First hidden layer
+        self.relu = nn.ReLU()  # ReLU activation function
+        self.fc2 = nn.Linear(32, 16)  # Second hidden layer
+        self.output = nn.Linear(16, 1)  # Output layer
+        self.sigmoid = nn.Sigmoid()  # Sigmoid activation function
+
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+        x = self.sigmoid(self.output(x))
+        return x
+
 
 
 def image_show(image):
@@ -161,6 +223,20 @@ def draw_boxes(boxes, ratios, limit):
         plt.gca().add_patch(rect)
 
 
+def draw_boxes_basic(boxes, color='r', linewidth=2):
+    """
+    draws boxes
+    """
+    for box in boxes:
+        x = box[0]
+        y = box[3]
+        x_width = box[2] - box[0]
+        y_width = box[3] - box[1]
+        rect = patches.Rectangle((x, y), x_width, -y_width, linewidth=linewidth, edgecolor=color, facecolor='none')
+        plt.gca().add_patch(rect)
+
+
+
 def draw_groupboxes(boxes):
     """
     draws pink boxes
@@ -220,6 +296,56 @@ def draw_enumerate_boxes(boxes, ratios, limit):
             plt.gca().text(x + x_width, y - y_width, text, fontsize=10, color="red")
         else:
             plt.gca().text(x + x_width, y - y_width, text, fontsize=10, color="green")
+
+
+def draw_enumerate_boxes_simple(boxes):
+    """
+    enumerates the peaks for better understanding
+    red = line
+    green = peak
+    """
+    for box in enumerate(boxes):
+        x = box[1][0]
+        y = box[1][3]
+        x_width = box[1][2] - box[1][0]
+        y_width = box[1][3] - box[1][1]
+        text = str(box[0])
+
+        plt.gca().text(x + x_width, y - y_width, text, fontsize=10, color="red")
+
+
+
+def draw_enumerate_boxes_simple_id(boxes):
+    """
+    enumerates the peaks for better understanding
+    red = line
+    green = peak
+    """
+    for box in boxes:
+        x = box[0]
+        y = box[3]
+        x_width = box[2] - box[0]
+        y_width = box[3] - box[1]
+        text = str(box[4])
+
+        plt.gca().text(x + x_width, y - y_width, text, fontsize=10, color="b")
+
+
+
+def draw_enumerate_boxes_simple_scores(boxes, scores):
+    """
+    enumerates the peaks for better understanding
+    red = line
+    green = peak
+    """
+    for box, score in zip(boxes, scores):
+        x = box[0]
+        y = box[3]
+        x_width = box[2] - box[0]
+        y_width = box[3] - box[1]
+        text = str(round(score, 2))
+
+        plt.gca().text(x + x_width, y - y_width, text, fontsize=10, color="b")
 
 
 def get_box_mid(boxes):
@@ -921,6 +1047,13 @@ def cluster_peak_boxes2(image, boxes, r, groupbox_extend):
     image_line_data = np.copy(image)
     image_line_data[mask_peak2 == 1] = 0
     image_line_data[mask_line2 == 0] = 0
+    #
+    # image_line_data0 = np.copy(giwaxs_img)
+    # image_line_data0[mask_peak2 == 1] = 0
+    # image_line_data0[mask_line2 == 0] = 0
+    #
+    # plt.imshow(image_line_data0, cmap='gray')
+    # plt.show()
 
     # cluster the lines
     mask_line3, l_cluster_boxes = fill_clusters_with_ones(np.copy(mask_line2))
@@ -932,7 +1065,6 @@ def cluster_peak_boxes2(image, boxes, r, groupbox_extend):
 
     image_line_data_y_flat = flatten_y_axis(image_line_data)
     # plt.plot(image_line_data_y_flat)
-
 
     return p_cluster_boxes, p_boxes_inside_clusters, l_cluster_boxes, l_boxes_inside_clusters, boxes_peak, boxes_line, image_line_data_y_flat
 
@@ -1300,71 +1432,71 @@ def draw_fit_image(image, fit_params_line, fit_params_peak):
     plt.show()
 
 
-def save_fit_image(image, fit_params_line, fit_params_peak, image_cont):
-    def rotated_gaussian_constant(x, y, amplitude, xo, sigma, theta):
-        xo = float(xo)
-        x_rot = x * np.cos(theta) - y * np.sin(theta)
-        y_rot = x * np.sin(theta) + y * np.cos(theta)  # not used since constant in y
-        g = amplitude * np.exp(-((x_rot - xo) ** 2) / (2 * sigma ** 2))
-        return g
-
-    def gaussian(x, y, amplitude, xo, yo, sigma_x, sigma_y, theta):
-        xo = float(xo)
-        yo = float(yo)
-        a = (np.cos(theta) ** 2) / (2 * sigma_x ** 2) + (np.sin(theta) ** 2) / (2 * sigma_y ** 2)
-        b = -(np.sin(2 * theta)) / (4 * sigma_x ** 2) + (np.sin(2 * theta)) / (4 * sigma_y ** 2)
-        c = (np.sin(theta) ** 2) / (2 * sigma_x ** 2) + (np.cos(theta) ** 2) / (2 * sigma_y ** 2)
-        g = amplitude * np.exp(- (a * ((x - xo) ** 2) + 2 * b * (x - xo) * (y - yo) + c * ((y - yo) ** 2)))
-        return g
-
-    x = np.linspace(1, 1024, 1024)
-    y = np.linspace(1, 512, 512)
-    x, y = np.meshgrid(x, y)
-
-    fit_image = np.zeros_like(image)
-    # display line fits
-    for fit in fit_params_line:
-        gg = rotated_gaussian_constant(x, y, fit[0], fit[1], fit[2], 0)
-        fit_image = fit_image + gg
-
-    # amplitude, xo, yo, sigma_x, sigma_y, theta, offset
-    #     0      1   2     3        4       5        6
-    # display peak fits
-    for fit in fit_params_peak:
-        gg = gaussian(x, y, fit[0], fit[1], fit[2], fit[3], fit[4], fit[5])
-        fit_image = fit_image + gg
-
-    # remove where beamstop is
-    fit_image[image == 0] = 0
-
-    # Create subplots
-    fig, axs = plt.subplots(2, 2, figsize=(20, 12))  # Adjust the figsize as needed
-
-    # Plot for fit_image
-    im0 = axs[0, 0].imshow(fit_image, origin='lower', cmap='hot', vmax=500)
-    axs[0, 0].set_ylim(512, 0)
-    fig.colorbar(im0, ax=axs[0, 0])
-
-    # Plot for giwaxs_img (assuming giwaxs_img is defined)
-    im1 = axs[0, 1].imshow(image, cmap="gray", vmin=0, vmax=2000)
-    axs[0, 1].set_ylim(512, 0)
-    fig.colorbar(im1, ax=axs[0, 1])
-
-    # Plot for residual_image
-    residual_image = image - fit_image
-    im2 = axs[1, 0].imshow(residual_image, cmap='gray', vmin=0, vmax=2000)
-    axs[1, 0].set_ylim(512, 0)
-    fig.colorbar(im2, ax=axs[1, 0])
-
-    # Plot for images with boxes
-    im2 = axs[1, 1].imshow(image_cont, cmap='gray')
-    axs[1, 1].set_ylim(512, 0)
-    draw_boxes(boxes=boxes, ratios=boxes_ratios, limit=0.8)
-    fig.colorbar(im2, ax=axs[1, 1])
-
-    # save the image
-    plt.savefig(f'labeled_fit_data/frame_{i:03d}.png')
-    plt.close()
+# def save_fit_image(image, fit_params_line, fit_params_peak, image_cont):
+#     def rotated_gaussian_constant(x, y, amplitude, xo, sigma, theta):
+#         xo = float(xo)
+#         x_rot = x * np.cos(theta) - y * np.sin(theta)
+#         y_rot = x * np.sin(theta) + y * np.cos(theta)  # not used since constant in y
+#         g = amplitude * np.exp(-((x_rot - xo) ** 2) / (2 * sigma ** 2))
+#         return g
+#
+#     def gaussian(x, y, amplitude, xo, yo, sigma_x, sigma_y, theta):
+#         xo = float(xo)
+#         yo = float(yo)
+#         a = (np.cos(theta) ** 2) / (2 * sigma_x ** 2) + (np.sin(theta) ** 2) / (2 * sigma_y ** 2)
+#         b = -(np.sin(2 * theta)) / (4 * sigma_x ** 2) + (np.sin(2 * theta)) / (4 * sigma_y ** 2)
+#         c = (np.sin(theta) ** 2) / (2 * sigma_x ** 2) + (np.cos(theta) ** 2) / (2 * sigma_y ** 2)
+#         g = amplitude * np.exp(- (a * ((x - xo) ** 2) + 2 * b * (x - xo) * (y - yo) + c * ((y - yo) ** 2)))
+#         return g
+#
+#     x = np.linspace(1, 1024, 1024)
+#     y = np.linspace(1, 512, 512)
+#     x, y = np.meshgrid(x, y)
+#
+#     fit_image = np.zeros_like(image)
+#     # display line fits
+#     for fit in fit_params_line:
+#         gg = rotated_gaussian_constant(x, y, fit[0], fit[1], fit[2], 0)
+#         fit_image = fit_image + gg
+#
+#     # amplitude, xo, yo, sigma_x, sigma_y, theta, offset
+#     #     0      1   2     3        4       5        6
+#     # display peak fits
+#     for fit in fit_params_peak:
+#         gg = gaussian(x, y, fit[0], fit[1], fit[2], fit[3], fit[4], fit[5])
+#         fit_image = fit_image + gg
+#
+#     # remove where beamstop is
+#     fit_image[image == 0] = 0
+#
+#     # Create subplots
+#     fig, axs = plt.subplots(2, 2, figsize=(20, 12))  # Adjust the figsize as needed
+#
+#     # Plot for fit_image
+#     im0 = axs[0, 0].imshow(fit_image, origin='lower', cmap='hot', vmax=500)
+#     axs[0, 0].set_ylim(512, 0)
+#     fig.colorbar(im0, ax=axs[0, 0])
+#
+#     # Plot for giwaxs_img (assuming giwaxs_img is defined)
+#     im1 = axs[0, 1].imshow(image, cmap="gray", vmin=0, vmax=2000)
+#     axs[0, 1].set_ylim(512, 0)
+#     fig.colorbar(im1, ax=axs[0, 1])
+#
+#     # Plot for residual_image
+#     residual_image = image - fit_image
+#     im2 = axs[1, 0].imshow(residual_image, cmap='gray', vmin=0, vmax=2000)
+#     axs[1, 0].set_ylim(512, 0)
+#     fig.colorbar(im2, ax=axs[1, 0])
+#
+#     # Plot for images with boxes
+#     im2 = axs[1, 1].imshow(image_cont, cmap='gray')
+#     axs[1, 1].set_ylim(512, 0)
+#     draw_boxes(boxes=boxes, ratios=boxes_ratios, limit=0.8)
+#     fig.colorbar(im2, ax=axs[1, 1])
+#
+#     # save the image
+#     plt.savefig(f'labeled_fit_data/frame_{i:03d}.png')
+#     plt.close()
 
 
 def a_test_set_hagen():
@@ -1488,23 +1620,23 @@ def average_out_boxes_over_images(boxes_time_list, image_time_list, confidences_
     """average over 3 images"""
     avg_time = 3
     n_images = len(boxes_time_list_int)
-    steps = n_images - 2 * (avg_time-1)
+    steps = n_images - 2 * (avg_time - 1)
     for i in range(steps):
         mask1 = np.zeros_like(image_time_list[0])
-        for boxes in boxes_time_list_int[i:i+avg_time]:
+        for boxes in boxes_time_list_int[i:i + avg_time]:
             for box in boxes:
                 mask1[box[1]:box[3], box[0]:box[2]] += 1
-        mask1[mask1 < np.ceil(avg_time/2)] = 0
+        mask1[mask1 < np.ceil(avg_time / 2)] = 0
 
         fig, axs = plt.subplots(3, 1, figsize=(5, 5))
         im1 = axs[0].imshow(mask1, cmap="hot")
         # fig.title(im1, str(i) + " to " + str(i+avg_time))
         fig.colorbar(im1, ax=axs[0])
 
-        im2 = axs[1].imshow(image_time_list[i+np.ceil(avg_time/2).astype(int)], cmap="gray", vmin=0, vmax=1000)
+        im2 = axs[1].imshow(image_time_list[i + np.ceil(avg_time / 2).astype(int)], cmap="gray", vmin=0, vmax=1000)
         fig.colorbar(im2, ax=axs[1])
 
-        single_image = image_time_list[i+np.ceil(avg_time/2).astype(int)]
+        single_image = image_time_list[i + np.ceil(avg_time / 2).astype(int)]
         single_image[single_image > 1000] = 1000
         single_image[single_image < 0] = 0
 
@@ -1535,10 +1667,10 @@ def radial_mean_custom_bins(image, num_bins):
     dist = distance.cdist(np.column_stack((x.ravel(), y.ravel())), [[0, 0]], 'euclidean').reshape(height, width)
 
     # Maximum possible distance
-    max_dist = np.hypot(width-1, height-1)
+    max_dist = np.hypot(width - 1, height - 1)
 
     # Create bins for distances
-    bins = np.linspace(0, max_dist, num=num_bins+1)
+    bins = np.linspace(0, max_dist, num=num_bins + 1)
     digitized = np.digitize(dist.ravel(), bins, right=True)
 
     # Get image values and set weights to 0 where image value is 0
@@ -1546,7 +1678,7 @@ def radial_mean_custom_bins(image, num_bins):
     weights = np.where(image_values != 0, image_values, 0)
 
     # Calculate sum and count for each bin
-    sum_bins = np.bincount(digitized, weights=image.ravel(), minlength=num_bins+1)
+    sum_bins = np.bincount(digitized, weights=image.ravel(), minlength=num_bins + 1)
 
     # Adjust count_bins to count only non-zero pixels
     nonzero_counts = np.where(image_values != 0, 1, 0)
@@ -1560,164 +1692,230 @@ def radial_mean_custom_bins(image, num_bins):
     return mean_bins[1:]  # Exclude last bin which is empty or partial
 
 
-def compare_intensities(raw_reciprocal_image, raw_polar_image):
-    # calculate the intensity
-    raw_radial_mean = radial_mean_custom_bins(raw_reciprocal_image, num_bins=1024)
+def simplified_get_exp_metrics(truth_boxes: Tensor, predicted_boxes: Tensor, matcher) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Simplified function to match truth and predicted bounding boxes using a specified matcher.
 
-    masked_array = np.ma.masked_equal(raw_polar_image, 0)
-    raw_polar_mean = np.mean(masked_array, axis=0)
+    Args:
+        truth_boxes (Tensor): Tensor of truth bounding boxes.
+        predicted_boxes (Tensor): Tensor of predicted bounding boxes.
+        matcher (Matcher): Matcher instance to use for matching boxes.
 
-    max_intensity = np.max([np.max(raw_radial_mean), np.max(raw_polar_mean)]) * 1.1
-    min_intensity = np.min([np.min(raw_radial_mean), np.min(raw_polar_mean)]) * 1.1
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: Match matrix, row indices, and column indices.
+    """
 
-    """PLOT"""
-    # Create figure and specify grid layout
-    fig = plt.figure(figsize=(10, 9))
-    gs = gridspec.GridSpec(3, 2, width_ratios=[2, 1], height_ratios=[1, 1, 1])
+    # Use the matcher to match truth and predicted bounding boxes
+    match_matrix, row_indices, col_indices = matcher(truth_boxes, predicted_boxes)
 
-    # Create subplots
-    ax1 = fig.add_subplot(gs[0, 0])  # Top left
-    ax2 = fig.add_subplot(gs[1, 0])  # Bottom left
-    ax3 = fig.add_subplot(gs[0, 1])  # Top right
-    ax4 = fig.add_subplot(gs[1, 1])  # Bottom right
-    ax5 = fig.add_subplot(gs[2, 0])
-    ax6 = fig.add_subplot(gs[2, 1])
-
-    # Example plotting commands
-    # You can replace these with your actual plotting code
-    ax1.plot(raw_radial_mean)
-    ax1.set_title("Radial mean")
-    ax1.set_ylim(min_intensity, max_intensity)
-    ax2.plot(raw_polar_mean)
-    ax2.set_title("Polar mean")
-    ax2.set_ylim(min_intensity, max_intensity)
-    ax3.imshow(raw_giwaxs_reciprocal_img, cmap="gray", vmin=0, vmax=500)
-    ax3.set_title("reciprocal image")
-    ax4.imshow(raw_giwaxs_img, cmap="gray", vmin=0, vmax=500)
-    ax4.set_title("polar image")
-    ax5.plot(raw_radial_mean - raw_polar_mean)
-    ax5.set_title("difference")
-    ax5.set_ylim(min_intensity, max_intensity)
-    ax6.remove()
-
-    # Adjust layout
-    plt.tight_layout()
-
-    # Show plot
-    plt.show()
+    return match_matrix, row_indices, col_indices
 
 
-def compare_intensities2(raw_reciprocal_image):
+def sort_and_filter_predicted_boxes(
+        truth_boxes: torch.Tensor,
+        predicted_boxes: torch.Tensor,
+        row_indices: List[int],
+        col_indices: List[int]
+) -> torch.Tensor:
+    """
+    Sorts and filters predicted bounding boxes based on matching with truth boxes.
 
-    im_polar = calc_polar_image(raw_reciprocal_image)
-    im_quasipolar = calc_quazipolar_image(raw_reciprocal_image)
+    Args:
+        truth_boxes (torch.Tensor): Tensor of truth bounding boxes.
+        predicted_boxes (torch.Tensor): Tensor of predicted bounding boxes.
+        row_indices (List[int]): Row indices from the matching process.
+        col_indices (List[int]): Column indices from the matching process.
 
-    im_polar_mask = im_polar != 0
-    im_polar_mean_values = np.sum(im_polar, axis=0) / np.sum(im_polar_mask, axis=0)
+    Returns:
+        torch.Tensor: Sorted and filtered tensor of predicted bounding boxes.
+    """
 
-    im_quasipolar_mask = im_quasipolar != 0
-    im_quasipolar_mean_values = np.sum(im_quasipolar, axis=0) / np.sum(im_quasipolar_mask, axis=0)
+    # Create a placeholder for sorted and filtered predicted boxes
+    sorted_predicted_boxes = torch.zeros_like(truth_boxes)
 
-    # calculate the intensity
-    raw_radial_mean = radial_mean_custom_bins(raw_reciprocal_image, num_bins=1024)
+    # Iterate over the matched indices and sort the predicted boxes
+    for i, row_idx in enumerate(row_indices):
+        col_idx = col_indices[i]
+        sorted_predicted_boxes[row_idx] = predicted_boxes[col_idx]
+
+    return sorted_predicted_boxes
 
 
-    max_intensity = np.max([np.max(raw_radial_mean), np.max(np.nan_to_num(im_polar_mean_values))]) * 1.1
-    min_intensity = np.min([np.min(raw_radial_mean), np.min(np.nan_to_num(im_polar_mean_values))]) * 1.1
+def draw_marks_on_mids(peak_param, color='r', alpha=1.0):
+    if peak_param.any():
+        for k in peak_param:
+            plt.scatter(k[1], k[2], color=color, marker='x', label='Point', s=50, alpha=alpha)
 
-    fig = plt.figure(figsize=(10, 7))
-    plt.plot(raw_radial_mean, label="Q space", lw=3)
-    plt.plot(im_polar_mean_values, label="polar space", lw=2)
-    plt.plot(im_quasipolar_mean_values, label="quasipolar space", lw=1)
-    plt.legend()
-    plt.title(img_name)
-    print(img_name)
-    plt.show()
 
-    print("radial mean: " + str(np.sum(raw_radial_mean)))
-    print("polar mean: " + str(np.sum(np.nan_to_num(im_polar_mean_values))))
-    print("quasipolar mean: " + str(np.sum(np.nan_to_num(im_quasipolar_mean_values))))
+def draw_lines_on_mids(line_param, color="r"):
+    if line_param.any():
+        for k in line_param:
+            plt.axvline(x=k[2], color=color, linestyle='--', label='Vertical Line')
 
-    """PLOT POLAR"""
-    # Create figure and specify grid layout
-    fig = plt.figure(figsize=(10, 9))
-    gs = gridspec.GridSpec(3, 2, width_ratios=[2, 1], height_ratios=[1, 1, 1])
 
-    # Create subplots
-    ax1 = fig.add_subplot(gs[0, 0])  # Top left
-    ax2 = fig.add_subplot(gs[1, 0])  # Bottom left
-    ax3 = fig.add_subplot(gs[0, 1])  # Top right
-    ax4 = fig.add_subplot(gs[1, 1])  # Bottom right
-    ax5 = fig.add_subplot(gs[2, 0])
-    ax6 = fig.add_subplot(gs[2, 1])
+def draw_sigmas(peak_param, n_sigmas=1, color=(1, 0, 0)):
+    axis = plt.gca()
+    for fit_i in peak_param:
+        # for n in range(n_sigmas):
 
-    # Example plotting commands
-    # You can replace these with your actual plotting code
-    ax1.plot(raw_radial_mean)
-    ax1.set_title("Radial mean")
-    ax1.set_ylim(min_intensity, max_intensity)
-    ax1.grid()
-    ax2.plot(im_polar_mean_values)
-    ax2.set_title("Polar mean")
-    ax2.set_ylim(min_intensity, max_intensity)
-    ax2.grid()
-    ax3.imshow(raw_giwaxs_reciprocal_img, cmap="inferno", vmin=0, vmax=500)
-    ax3.set_title("reciprocal image")
-    ax4.imshow(im_polar, cmap="inferno", vmin=0, vmax=500)
-    ax4.set_title("polar image")
-    ax5.plot(raw_radial_mean - im_polar_mean_values)
-    ax5.set_title("difference")
-    ax5.set_ylim(-max_intensity/2, max_intensity)
-    ax6.remove()
+        # amplitude, xo, yo, sigma_x, sigma_y, theta, offset
+        #     0      1   2     3        4       5        6
+        ellipse = Ellipse(xy=(fit_i[1], fit_i[2]), width=2 * fit_i[3], height=2 * fit_i[4],
+                          angle=np.degrees(-fit_i[5]),
+                          edgecolor=color, fc='None', lw=2, ls='--')
+        axis.add_patch(ellipse)
 
-    # Adjust layout
-    plt.tight_layout()
+        # ellipse = Ellipse(xy=(fit_i[1], fit_i[2]), width=4 * fit_i[3], height=4 * fit_i[4],
+        #                   angle=np.degrees(-fit_i[5]),
+        #                   edgecolor=color, fc='None', lw=2, ls='--')
+        # axis.add_patch(ellipse)
 
-    # Show plot
-    plt.show()
 
-    """PLOT QUASIPOLAR"""
-    # Create figure and specify grid layout
-    fig = plt.figure(figsize=(10, 9))
-    gs = gridspec.GridSpec(3, 2, width_ratios=[2, 1], height_ratios=[1, 1, 1])
+def postprocessing_images(predictions, scores):
+    min_score = 0.01
 
-    # Create subplots
-    ax1 = fig.add_subplot(gs[0, 0])  # Top left
-    ax2 = fig.add_subplot(gs[1, 0])  # Bottom left
-    ax3 = fig.add_subplot(gs[0, 1])  # Top right
-    ax4 = fig.add_subplot(gs[1, 1])  # Bottom right
-    ax5 = fig.add_subplot(gs[2, 0])
-    ax6 = fig.add_subplot(gs[2, 1])
+    # Initialize postprocessing steps with desired parameters
+    standard_postprocessing = StandardPostprocessing(nms_level=0.01, score_level=min_score)
+    small_q_filter = SmallQFilter(min_q_pix=50.0)
+    merge_boxes_postprocessing = MergeBoxesPostprocessing(
+        min_score=min_score)  # , min_iou=0.5, max_q=5.0, mode='mean-quantile',
+    # quantile=0.8)
 
-    # Example plotting commands
-    # You can replace these with your actual plotting code
-    ax1.plot(raw_radial_mean)
-    ax1.set_title("Radial mean")
-    ax1.set_ylim(min_intensity, max_intensity)
-    ax1.grid()
-    ax2.plot(im_quasipolar_mean_values)
-    ax2.set_title("Quasipolar mean")
-    ax2.set_ylim(min_intensity, max_intensity)
-    ax2.grid()
-    ax3.imshow(raw_reciprocal_image, cmap="inferno", vmin=0, vmax=500)
-    ax3.set_title("reciprocal image")
-    ax4.imshow(im_quasipolar, cmap="inferno", vmin=0, vmax=500)
-    ax4.set_title("quasipolar image")
-    ax5.plot(raw_radial_mean - im_quasipolar_mean_values)
-    ax5.set_title("difference")
-    ax5.set_ylim(-max_intensity, max_intensity)
-    ax6.remove()
+    # Combine postprocessing steps into a pipeline
+    pipeline = PostprocessingPipeline(
+        standard_postprocessing,
+        small_q_filter,
+        merge_boxes_postprocessing
+    )
 
-    # Adjust layout
-    plt.tight_layout()
+    refined_predictions, refined_scores = pipeline(predictions, scores)
 
-    # Show plot
-    plt.show()
+    return refined_predictions, refined_scores
+
+
+def compute_iou_matrix(boxes1, boxes2):
+    """
+    Compute a matrix of IoU values between two sets of boxes.
+
+    Parameters:
+    boxes1 -- an array of shape (N, 4) of boxes (xmin, ymin, xmax, ymax)
+    boxes2 -- an array of shape (M, 4) of boxes (xmin, ymin, xmax, ymax)
+
+    Returns:
+    iou_matrix -- a NumPy array of shape (N, M) containing IoU values.
+    """
+    # Expand the boxes to compare every box in boxes1 with every box in boxes2
+    boxes1 = np.expand_dims(boxes1, axis=1)  # Shape becomes (N, 1, 4)
+    boxes2 = np.expand_dims(boxes2, axis=0)  # Shape becomes (1, M, 4)
+
+    # Compute intersection coordinates
+    inter_max_xy = np.minimum(boxes1[..., 2:], boxes2[..., 2:])
+    inter_min_xy = np.maximum(boxes1[..., :2], boxes2[..., :2])
+    inter_wh = np.maximum(inter_max_xy - inter_min_xy, 0)
+
+    # Compute intersection and union areas
+    inter_area = inter_wh[..., 0] * inter_wh[..., 1]
+    box1_area = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+    box2_area = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+    union_area = box1_area + box2_area - inter_area
+
+    # Compute IoU values
+    iou_matrix = inter_area / union_area
+
+    return iou_matrix
+
+
+def find_corresponding_boxes(frame1_boxes, frame2_boxes, iou_threshold=0.5):
+    """
+    Find the corresponding boxes in two consecutive frames using NumPy for efficiency.
+
+    Parameters:
+    frame1_boxes -- NumPy array of shape (N, 4) for the first frame
+    frame2_boxes -- NumPy array of shape (M, 4) for the second frame
+    iou_threshold -- threshold above which boxes are considered corresponding
+
+    Returns:
+    matches -- list of tuples (index_frame1, index_frame2) indicating corresponding boxes
+    """
+    iou_matrix = compute_iou_matrix(np.array(frame1_boxes), np.array(frame2_boxes))
+    matches = []
+
+    # Iterate over each row (box in frame1), finding the column (box in frame2) with the highest IoU
+    for i, row in enumerate(iou_matrix):
+        max_iou_idx = np.argmax(row)
+        if row[max_iou_idx] > iou_threshold:
+            matches.append((i, max_iou_idx))
+
+    return matches
+
+
+def postprocessing_images2(predictions, scores):
+    min_score = 0.01
+
+    # Initialize postprocessing steps with desired parameters
+    standard_postprocessing = StandardPostprocessing(nms_level=0.01, score_level=min_score)
+    small_q_filter = SmallQFilter(min_q_pix=50.0)
+    merge_boxes_postprocessing = MergeBoxesPostprocessing(
+        min_score=min_score)  # , min_iou=0.5, max_q=5.0, mode='mean-quantile',
+    # quantile=0.8)
+
+    # Combine postprocessing steps into a pipeline
+    pipeline = PostprocessingPipeline(
+        standard_postprocessing,
+        small_q_filter,
+        merge_boxes_postprocessing
+    )
+
+    refined_predictions, refined_scores = pipeline(predictions, scores)
+
+    return refined_predictions, refined_scores
+
+
+def calculate_bounding_boxes(peaks):
+    """
+    Calculate bounding boxes for multiple 2D Gaussian peaks ignoring the theta.
+
+    Args:
+    peaks (numpy array): An array with rows representing parameters of each Gaussian peak.
+                         The columns are ["amp", "x0", "y0", "sigma_x", "sigma_y", "theta", "offset", "id"].
+
+    Returns:
+    numpy array: An array where each row contains the bounding box [x_min, y_min, x_max, y_max] of each peak.
+    """
+    # Factor to convert sigma to FWHM
+    fwhm_factor = 2 * np.sqrt(2 * np.log(2))
+
+    # Initialize the output array
+    bounding_boxes = np.zeros((peaks.shape[0], 4))  # Each row will have [x_min, y_min, x_max, y_max]
+
+    # Calculate bounding box for each peak
+    for i, peak in enumerate(peaks):
+        sigma_x, sigma_y = peak[3], peak[4]
+        fwhm_x = sigma_x * fwhm_factor
+        fwhm_y = sigma_y * fwhm_factor
+
+        x0, y0 = peak[1], peak[2]
+
+        x_min = x0 - fwhm_x / 2
+        x_max = x0 + fwhm_x / 2
+        y_min = y0 - fwhm_y / 2
+        y_max = y0 + fwhm_y / 2
+
+        bounding_boxes[i] = [x_min, y_min, x_max, y_max]
+
+    return bounding_boxes
+
 
 
 if __name__ == '__main__':
     # a_test_set_hagen()
-    data = H5GIWAXSDataset("../35_flipped.h5", buffer_size=5, unskewed_polar=True)
+    with open('gixd-fit/object_arrays.pkl', 'rb') as file:
+        own_predictions = pickle.load(file)
+    data = H5GIWAXSDataset("hagen/35_flipped_quazi_labeled_512.h5", buffer_size=5, unskewed_polar=True,
+                           contrast_correction=True)
+    # data = H5GIWAXSDataset("35_flipped.h5", buffer_size=5, unskewed_polar=True)
+    # data = H5GIWAXSDataset("revised_25.h5", buffer_size=5, unskewed_polar=True)
     # save_plot_to_mp4()
     # data = H5GIWAXSDataset_h("hagen/batch_1_labeled.h5", buffer_size=5, unskewed_polar=False)
 
@@ -1725,117 +1923,186 @@ if __name__ == '__main__':
     boxes_time_list = []
     confidences_time_list = []
 
+    peak_param_p_relative_eval_list = np.zeros((1, 8))
+    peak_param_p_eval_list = np.zeros((1, 16))
+
+    # load prediction model
+    fp_detector = SimpleBinaryClassifier_12()
+    fp_detector.load_state_dict(torch.load("fp_detector_12_better.pth"))
+    fp_detector.eval()
+
+    images_np = []
+    boxes_np = []
+    scores_np = []
+
+    dif_pred_lab_x_list = []
+    dif_pred_lab_y_list = []
+
+    dif_fit_lab_x_list = []
+    dif_fit_lab_y_list = []
+
     for i, giwaxs_img_container in enumerate(data.iter_images()):
-
-        line_p, line_e, peak_p = FitBoxes(giwaxs_img_container, plot_fits=True).fit()
-
-        print("a")
-        continue
-        # if i == 20:
-        #     break
-        #
-        # image_time_list.append(giwaxs_img_container.raw_polar_image)
-        # boxes_time_list.append(giwaxs_img_container.reciprocal_labels.boxes)
-        # confidences_time_list.append(giwaxs_img_container.reciprocal_labels.confidences)
-        # continue
 
         giwaxs_img = giwaxs_img_container.converted_polar_image
         raw_giwaxs_img = giwaxs_img_container.raw_polar_image
-        raw_giwaxs_reciprocal_img = giwaxs_img_container.raw_reciprocal
+        img_name = giwaxs_img_container.polar_labels.img_name
+        boxes_labeled = giwaxs_img_container.polar_labels.boxes
+        scores_labeled = giwaxs_img_container.polar_labels.confidences
 
-        # plt.imshow(raw_giwaxs_reciprocal_img, vmin=0, vmax=500, cmap="inferno")
-        # plt.ylim([0, raw_giwaxs_reciprocal_img.shape[0]])
+        # filter out low confidence boxes
+        boxes_predicted = np.delete(giwaxs_img_container.reciprocal_labels.predictions,
+                                    np.where(giwaxs_img_container.reciprocal_labels.scores < 0), axis=0)
+
+        scores_predicted = np.delete(giwaxs_img_container.reciprocal_labels.scores,
+                                     np.where(giwaxs_img_container.reciprocal_labels.scores < 0), axis=0)
+
+        # boxes_predicted = own_predictions[i]
+        # boxes_predicted = np.array(boxes_predicted, dtype=float)
+
+        # print(boxes_predicted)
+
+        # plt.figure(figsize=(10, 10/2))
+        # plt.imshow(giwaxs_img, cmap='gray')
+        # plt.axis('off')
+        # plt.savefig(str(i) + "_example_fig.pdf", bbox_inches='tight')
+        # draw_boxes_basic(boxes_labeled)
+        # draw_boxes_basic(boxes_predicted, color='b')
+        # plt.savefig(str(i) + "_example_fig_boxes.pdf", bbox_inches='tight')
         # plt.show()
-        #
-        # im_polar_test = calc_polar_image(raw_giwaxs_reciprocal_img)
-        # plt.imshow(im_polar_test, vmin=0, vmax=500, cmap="inferno")
-        # plt.show()
-        #
-        # plt.imshow(raw_giwaxs_img, vmin=0, vmax=500, cmap="inferno")
-        # plt.show()
+        # plt.close()
 
-        # labels = giwaxs_img_container.reciprocal_labels
-        labels = giwaxs_img_container.polar_labels
-        fits = giwaxs_img_container.fits
-        boxes = labels.boxes
-        img_name = labels.img_name
+        """MATCH THE IDs"""
+        # matcher = QMatcher(1., rel=True, min_iou=0.1)
+        matcher = QMatcher(10., rel=False, min_iou=0.01)
 
-        # compare_intensities2(raw_reciprocal_image=raw_giwaxs_reciprocal_img)
+        match_matrix, row_indices, col_indices = matcher(torch.from_numpy(boxes_labeled),
+                                                         torch.from_numpy(boxes_predicted))
 
-        # get the image name
-        # drop confidences
-        # boxes = np.delete(labels.boxes, np.where(labels.confidences < 0.9), axis=0)
-        # calculate ratios
-        boxes_ratios = calculate_box_to_height_ratios(image=raw_giwaxs_img, boxes=boxes)
+        boxes_predicted_sorted = sort_and_filter_predicted_boxes(torch.from_numpy(boxes_labeled),
+                                                                 torch.from_numpy(boxes_predicted),
+                                                                 row_indices, col_indices)
 
-        # show whole image
-        # image_show(giwaxs_img)
-        # plt.title(img_name)
-        # draw_boxes(boxes=boxes, ratios=boxes_ratios, limit=0.8)
-        # draw_boxes_ratios(boxes=boxes, ratios=boxes_ratios, limit=0.8)
-        # draw_enumerate_boxes(boxes=boxes, ratios=boxes_ratios, limit=0.8)
+        boxes_predicted_sorted = np.array(boxes_predicted_sorted)
 
-        # plt.show()
+        """MATCH LABELED BOXES TO PREDICTED BOXES"""
+        # Initialize arrays to hold IDs for both labeled and predicted boxes, setting initial IDs.
+        # This time, every box gets an ID regardless of being matched or not.
+        labeled_ids_with_matches = np.arange(1, len(boxes_labeled) + 1)
+        predicted_ids_with_matches = np.arange(1, len(boxes_predicted) + 1)
 
-        """CLUSTERING"""
-        start_time = time.time()
-        # groups peaks boxes togehter into a big box. for better fitting
-        (peak_cluster_boxes, peak_boxes_inside_clusters,
-         line_cluster_boxes, line_boxes_inside_clusters,
-         peak_boxes, line_boxes, image_line_data_y_flat) = cluster_peak_boxes2(raw_giwaxs_img, boxes, 7, 1)
-        end_time = time.time()
-        print(f"The clustering process took {end_time - start_time:.4f} seconds to complete.")
+        # Reset IDs for predicted to ensure they start after the last labeled ID to avoid initial overlap
+        predicted_ids_with_matches += labeled_ids_with_matches[-1]
 
-        """LINE FIT"""
-        start_time = time.time()
-        fit_params_line = []
-        for cluster, boxes_in_cluster in zip(line_cluster_boxes, line_boxes_inside_clusters):
-            fit_params_line.extend(N1DGaussian(image_line_data_y_flat, boxes_in_cluster, cluster).fit_n_1d_gaussians())
-        end_time = time.time()
-        duration = end_time - start_time
-        print(f"The line fitting process took {duration:.4f} seconds to complete.")
+        # Go through the matches and assign the same ID to both matched labeled and predicted boxes
+        for row_idx, col_idx in zip(row_indices, col_indices):
+            # Use the labeled box's ID for both to ensure matched pairs share the same ID
+            predicted_ids_with_matches[col_idx] = labeled_ids_with_matches[row_idx]
 
+        boxes_labeled_ids = np.concatenate([boxes_labeled, labeled_ids_with_matches.reshape(-1, 1)], axis=1)
+        boxes_predicted_ids = np.concatenate([boxes_predicted, predicted_ids_with_matches.reshape(-1, 1)], axis=1)
+
+
+        def match_ids(array1, array2):
+            ids1 = array1[:, -1]
+            ids2 = array2[:, -1]
+
+            # Find common IDs
+            common_ids = np.intersect1d(ids1, ids2)
+
+            # Filter arrays based on common IDs
+            filtered_array1 = np.array([row for row in array1 if row[-1] in common_ids])
+            filtered_array2 = np.array([row for row in array2 if row[-1] in common_ids])
+
+            # Ensure the arrays are sorted by ID to align them for difference calculation
+            filtered_array1 = filtered_array1[np.argsort(filtered_array1[:, -1])]
+            filtered_array2 = filtered_array2[np.argsort(filtered_array2[:, -1])]
+
+            # Calculate differences
+            array_matched = np.concatenate([filtered_array1[:, :-1], filtered_array2], axis=1)
+
+            return array_matched
+
+        """
+        DO THE CALCULATIONS
+        """
+
+        line_params_l, line_params_err_l, line_errors_l, peak_param_l, peak_param_err_l, peak_errors_l = \
+            FitBoxes(raw_giwaxs_img, giwaxs_img, img_name, boxes_labeled_ids,
+                     plot_fits=False, dataframe=False).fit()
+
+        line_params_p, line_params_err_p, line_errors_p, peak_param_p, peak_param_err_p, peak_errors_p = \
+            FitBoxes(raw_giwaxs_img, giwaxs_img, img_name, boxes_predicted_ids,
+                     plot_fits=False, dataframe=False).fit()
+
+        def calculate_mids_and_concatenate_ids(boxes):
+            """Calculate the midpoints and concatenate with the ID column."""
+            x_mids = ((boxes[:, 0] + boxes[:, 2]) / 2).reshape(-1, 1)
+            y_mids = ((boxes[:, 1] + boxes[:, 3]) / 2).reshape(-1, 1)
+            ids = boxes[:, -1].reshape(-1, 1)
+            return np.concatenate([x_mids, y_mids, ids], axis=1)
+
+        def filter_and_sort_by_ids(data, keeper_ids):
+            """Filter out entries that don't match keeper_ids and sort by IDs."""
+            filtered_data = data[np.isin(data[:, -1], keeper_ids)]
+            return filtered_data[np.argsort(filtered_data[:, -1])]
+
+        labeled_mids = calculate_mids_and_concatenate_ids(boxes_labeled_ids)
+        predicted_mids = calculate_mids_and_concatenate_ids(boxes_predicted_ids)
+
+        keeper_ids = np.intersect1d(labeled_mids[:, -1], predicted_mids[:, -1])
+
+        labeled_mids_filtered_sorted = filter_and_sort_by_ids(labeled_mids, keeper_ids)
+        predicted_mids_filtered_sorted = filter_and_sort_by_ids(predicted_mids, keeper_ids)
+
+        # process the fit mids
+        print(line_params_p)
+        print(peak_param_p)
+        if (line_params_p.size > 0) and (peak_param_p.size > 0):
+            p_x_mids = np.concatenate((line_params_p[:, (2, 5)], peak_param_p[:, (1, 7)]), axis=0)
+        elif (peak_param_p.size > 0):
+            p_x_mids = peak_param_p[:, (1, 7)]
+        p_y_mids = peak_param_p[:, (2, 7)]
+
+        p_x_mids_filtered = filter_and_sort_by_ids(p_x_mids, keeper_ids)
+
+        dif_pred_lab = abs(labeled_mids_filtered_sorted[:, 0] - predicted_mids_filtered_sorted[:, 0])
+        dif_fit_lab = abs(labeled_mids_filtered_sorted[:, 0] - p_x_mids_filtered[:, 0])
+
+        print("fit x: " + str(np.mean(dif_fit_lab)))
+        print("pred x: " + str(np.mean(dif_pred_lab)))
+
+        dif_pred_lab_x_list.append(dif_pred_lab)
+        dif_fit_lab_x_list.append(dif_fit_lab)
+
+        keeper_ids_y = np.intersect1d(labeled_mids[:, -1], p_y_mids[:, -1])
+
+        labeled_mids_filtered_sorted = filter_and_sort_by_ids(labeled_mids, keeper_ids_y)
+        predicted_mids_filtered_sorted = filter_and_sort_by_ids(predicted_mids, keeper_ids_y)
+        p_y_mids_filtered = filter_and_sort_by_ids(p_y_mids, keeper_ids_y)
+
+        dif_pred_lab_y = abs(labeled_mids_filtered_sorted[:, 1] - predicted_mids_filtered_sorted[:, 1])
+        dif_fit_lab_y = abs(labeled_mids_filtered_sorted[:, 1] - p_y_mids_filtered[:, 0])
+
+        print("fit y: " + str(np.mean(dif_fit_lab_y)))
+        print("pred y: " + str(np.mean(dif_pred_lab_y)))
+
+        dif_pred_lab_y_list.append(dif_pred_lab_y)
+        dif_fit_lab_y_list.append(dif_fit_lab_y)
+
+        boxes_fit = calculate_bounding_boxes(peak_param_p)
+
+        plt.figure(figsize=(10, 10/2))
+        plt.imshow(giwaxs_img, cmap='gray')
+        plt.axis('off')
+        draw_boxes_basic(boxes_labeled, color='r', linewidth=3)
+        draw_boxes_basic(boxes_predicted, color='b', linewidth=3)
+        draw_boxes_basic(boxes_fit, color='g', linewidth=3)
         plt.show()
+        plt.close()
 
-        """2D PEAKS FIT"""
-        peak_param_lst = []
-        errors_lst = []
-        # n-2d-gaussian on every peak cluster
-        start_time_peak = time.time()
-        for c_b, b_in_c in zip(enumerate(peak_cluster_boxes), peak_boxes_inside_clusters):
-            # count the round
-            print(str(c_b[0] + 1) + "/" + str(len(peak_cluster_boxes)) + ", n(gaussians): " + str(len(b_in_c)))
-            fit_func = LMFunctions(raw_giwaxs_img, b_in_c, c_b[1], plot_result=False)
-            best_fit_param, errors = fit_func.fit_n_2d_gaussian()
-            peak_param_lst.extend(best_fit_param)
-            errors_lst.append(errors)
 
-        end_time_peak = time.time()
-        duration_peak = end_time_peak - start_time_peak
-        print(f"The peak fitting process took {duration_peak:.4f} seconds to complete.")
-        peak_params = np.array(peak_param_lst)
-        if errors_lst:
-            df_errors = pd.DataFrame(np.array(errors_lst))
-            df_errors.columns = ["RMSE", "MAE", "MAPE", "R^2", "R^2_adj", "Q^2", "n(pixel)", "gaussians"]
-            # amplitude, xo, yo, sigma_x, sigma_y, theta, offset
-            #     0      1   2     3        4       5        6
-
-        plot_peak = False
-        if plot_peak:
-            if peak_param_lst:
-                # plot_fit_image(raw_giwaxs_img, fit_results)
-                fig, ax = plt.subplots()
-                image_show(giwaxs_img)
-                plt.title(img_name)
-                draw_marks_on_peaks(peak_params[:, 1:3])
-                # draw_simga_ellipses(peak_params, ax)
-                draw_boxes(boxes=boxes, ratios=boxes_ratios, limit=0.8)
-                draw_groupboxes(peak_cluster_boxes)
-                plt.show()
-
-        # display fits
-        fit_params_line = np.array(fit_params_line)
-        # draw_fit_image(raw_giwaxs_img, fit_params_line, peak_param_lst)
-        save_fit_image(raw_giwaxs_img, fit_params_line, peak_param_lst, giwaxs_img)
-
-    # average_out_boxes_over_images(boxes_time_list, image_time_list, confidences_time_list)
+    print("final")
+    print("pred x: " + str(np.mean(np.concatenate(dif_pred_lab_x_list))))
+    print("fit x: " + str(np.mean(np.concatenate(dif_fit_lab_x_list))))
+    print("pred y: " + str(np.mean(np.concatenate(dif_pred_lab_y_list))))
+    print("fit y: " + str(np.mean(np.concatenate(dif_fit_lab_y_list))))

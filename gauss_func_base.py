@@ -288,3 +288,42 @@ class OneDGaussians:
         lin = lin_1d(x, m, b)
         return g0 + g1 + g2 + g3 + g4 + g5 + lin
 
+    def seven_oneD_gaussians(x,
+                           amplitude0, sigma0, xo0,
+                           amplitude1, sigma1, xo1,
+                           amplitude2, sigma2, xo2,
+                           amplitude3, sigma3, xo3,
+                           amplitude4, sigma4, xo4,
+                           amplitude5, sigma5, xo5,
+                           amplitude6, sigma6, xo6,
+                           m, b):
+        g0 = gaussian_1d(x, amplitude0, sigma0, xo0)
+        g1 = gaussian_1d(x, amplitude1, sigma1, xo1)
+        g2 = gaussian_1d(x, amplitude2, sigma2, xo2)
+        g3 = gaussian_1d(x, amplitude3, sigma3, xo3)
+        g4 = gaussian_1d(x, amplitude4, sigma4, xo4)
+        g5 = gaussian_1d(x, amplitude5, sigma5, xo5)
+        g6 = gaussian_1d(x, amplitude6, sigma6, xo6)
+        lin = lin_1d(x, m, b)
+        return g0 + g1 + g2 + g3 + g4 + g5 + g6 + lin
+
+    def eight_oneD_gaussians(x,
+                           amplitude0, sigma0, xo0,
+                           amplitude1, sigma1, xo1,
+                           amplitude2, sigma2, xo2,
+                           amplitude3, sigma3, xo3,
+                           amplitude4, sigma4, xo4,
+                           amplitude5, sigma5, xo5,
+                           amplitude6, sigma6, xo6,
+                           amplitude7, sigma7, xo7,
+                           m, b):
+        g0 = gaussian_1d(x, amplitude0, sigma0, xo0)
+        g1 = gaussian_1d(x, amplitude1, sigma1, xo1)
+        g2 = gaussian_1d(x, amplitude2, sigma2, xo2)
+        g3 = gaussian_1d(x, amplitude3, sigma3, xo3)
+        g4 = gaussian_1d(x, amplitude4, sigma4, xo4)
+        g5 = gaussian_1d(x, amplitude5, sigma5, xo5)
+        g6 = gaussian_1d(x, amplitude6, sigma6, xo6)
+        g7 = gaussian_1d(x, amplitude7, sigma7, xo7)
+        lin = lin_1d(x, m, b)
+        return g0 + g1 + g2 + g3 + g4 + g5 + g6 + g7 + lin
